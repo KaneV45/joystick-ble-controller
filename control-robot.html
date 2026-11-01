@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Control de robot por BLE</title>
+<style>
+:root{--bg:#e4e2dc;--card:#f4f3ef;--fg:#1d1f22;--mut:#5d6166;--ac:#e8590c;--acfg:#fff;--line:#bdbab2;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17191c;--card:#22252a;--fg:#ecebe6;--mut:#9a9da3;--ac:#ff7a2f;--acfg:#17191c;--line:#3a3e45}}
+:root[data-theme="dark"]{--bg:#17191c;--card:#22252a;--fg:#ecebe6;--mut:#9a9da3;--ac:#ff7a2f;--acfg:#17191c;--line:#3a3e45}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:520px;margin:0 auto;padding:16px}
+h1{font-size:1.35rem;margin:0 0 4px}
+p{margin:0 0 12px;color:var(--mut)}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+h2{font-size:1rem;margin:0 0 10px}
+button{font:inherit;font-weight:600;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;padding:12px;touch-action:none;user-select:none;-webkit-user-select:none}
+button:focus-visible,input:focus-visible{outline:3px solid var(--ac);outline-offset:2px}
+#conn{width:100%;background:var(--ac);color:var(--acfg);border-color:var(--ac);font-size:1.05rem}
+.pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:300px;margin:0 auto}
+.pad button{height:68px;font-size:1.2rem}
+.pad button.on,button.on{background:var(--ac);color:var(--acfg);border-color:var(--ac)}
+.map{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+label{display:block;font-size:.85rem;color:var(--mut)}
+input[type=text]{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+#st{font-weight:600}
+#log{font:.85rem/1.3 ui-monospace,Menlo,monospace;color:var(--mut);margin-top:6px;word-break:break-word}
+#warn{display:none;color:#b42318;font-weight:600;margin-bottom:10px}
+</style>
+</head>
+<body>
+<main>
+<h1>Control de robot por BLE</h1>
+<p>Lee el control de PS4 y manda letras al módulo Bluetooth del Arduino.</p>
+<div id="warn">Este navegador no tiene Web Bluetooth. En iPhone abrí esta página en la app Bluefy.</div>
+
+<section>
+<h2>Conexión</h2>
+<button id="conn">Conectar módulo BLE</button>
+<div id="st" style="margin-top:8px">Sin conectar</div>
+<div id="gp" style="color:var(--mut)">Control: no detectado (apretá un botón)</div>
+<div class="row">
+<label>Servicio (auto = lo busca solo)<input type="text" id="svc" value="auto"></label>
+<label>Característica<input type="text" id="chr" value="auto"></label>
+</div>
+<label style="margin-top:8px"><input type="checkbox" id="rep"> Repetir la letra mientras se mantiene (cada 150 ms)</label>
+<div id="log">Sin envíos todavía</div>
+</section>
+
+<section>
+<h2>Prueba en pantalla</h2>
+<div class="pad">
+<span></span><button data-k="F">Adelante</button><span></span>
+<button data-k="L">Izquierda</button><button data-k="S">Parar</button><button data-k="R">Derecha</button>
+<span></span><button data-k="B">Atrás</button><span></span>
+</div>
+</section>
+
+<section>
+<h2>Letras que se envían</h2>
+<div class="map" id="map"></div>
+<p style="margin:8px 0 0">Los botones ×, ○, □ y △ se envían solo si les ponés una letra.</p>
+</section>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const names={F:'Adelante',B:'Atrás',L:'Izquierda',R:'Derecha',S:'Parar',b0:'Botón ×',b1:'Botón ○',b2:'Botón □',b3:'Botón △'};
+const map={F:'F',B:'B',L:'L',R:'R',S:'S',b0:'',b1:'',b2:'',b3:''};
+try{Object.assign(map,JSON.parse(localStorage.getItem('map')||'{}'))}catch(e){}
+let ch=null,cur='S',lastT=0,pend=null;
+
+const mapBox=$('map');
+Object.keys(names).forEach(k=>{
+  const l=document.createElement('label');
+  l.textContent=names[k];
+  const i=document.createElement('input');
+  i.type='text';i.maxLength=4;i.value=map[k];
+  i.oninput=()=>{map[k]=i.value;try{localStorage.setItem('map',JSON.stringify(map))}catch(e){}};
+  l.appendChild(i);mapBox.appendChild(l);
+});
+
+if(!navigator.bluetooth)$('warn').style.display='block';
+const log=t=>{$('log').textContent=t};
+log('Web Bluetooth: '+(navigator.bluetooth?'sí':'no')+'. Página incrustada: '+(window.top!==window?'sí':'no')+'.');
+const parse=v=>{v=v.trim();return /^[0-9a-f]{4}$/i.test(v)?parseInt(v,16):v.toLowerCase()};
+
+$('conn').onclick=async()=>{
+  try{
+    $('st').textContent='Buscando módulos…';
+    const auto=$('svc').value.trim().toLowerCase()==='auto';
+    const common=[0xFFE0,0xFFF0,0xFFE5,0xFFB0,0xFFC0,0xFFD0,0xAE00,0xFEE0,'6e400001-b5a3-f393-e0a9-e50e24dcca9e','49535343-fe7d-4ae5-8fa9-9fafd205e455'];
+    const dev=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:auto?common:[parse($('svc').value)]});
+    dev.addEventListener('gattserverdisconnected',()=>{ch=null;$('st').textContent='Desconectado'});
+    $('st').textContent='Conectando…';
+    const srv=await dev.gatt.connect();
+    let info='';
+    ch=null;
+    if(auto){
+      for(const sv of await srv.getPrimaryServices()){
+        for(const c of await sv.getCharacteristics()){
+          if(!ch&&(c.properties.write||c.properties.writeWithoutResponse)){ch=c;info=' (servicio '+sv.uuid.slice(0,8)+', característica '+c.uuid.slice(0,8)+')'}
+        }
+      }
+      if(!ch)throw new Error('No encontré una característica de escritura. Revisá los servicios con LightBlue.');
+    }else{
+      const sv=await srv.getPrimaryService(parse($('svc').value));
+      ch=await sv.getCharacteristic(parse($('chr').value));
+    }
+    $('st').textContent='Conectado a '+(dev.name||'el módulo')+info;
+  }catch(e){$('st').textContent='No se pudo conectar';log('Error: '+e.message)}
+};
+
+async function send(t){
+  if(!t||!ch)return;
+  const now=performance.now();
+  if(now-lastT<75){pend=t;return}
+  lastT=now;pend=null;
+  try{
+    const d=new TextEncoder().encode(t);
+    if(ch.writeValueWithoutResponse)await ch.writeValueWithoutResponse(d);else await ch.writeValue(d);
+    log('Último envío: '+t);
+  }catch(e){log('Error al enviar: '+e.message)}
+}
+setInterval(()=>{if(pend)send(pend)},40);
+setInterval(()=>{if($('rep').checked&&cur!=='S')send(map[cur])},150);
+
+function setKey(k){
+  if(k===cur)return;
+  cur=k;send(map[k]);
+  document.querySelectorAll('[data-k]').forEach(b=>b.classList.toggle('on',b.dataset.k===k));
+}
+
+document.querySelectorAll('[data-k]').forEach(b=>{
+  b.addEventListener('pointerdown',e=>{e.preventDefault();setKey(b.dataset.k)});
+  ['pointerup','pointercancel','pointerleave'].forEach(ev=>b.addEventListener(ev,()=>{if(cur===b.dataset.k&&b.dataset.k!=='S')setKey('S')}));
+});
+
+setInterval(()=>{
+  const pads=navigator.getGamepads?[...navigator.getGamepads()].filter(Boolean):[];
+  const gp=pads[0];
+  if(!gp){$('gp').textContent='Control: no detectado (apretá un botón)';return}
+  $('gp').textContent='Control: '+gp.id.slice(0,38);
+  const b=i=>gp.buttons[i]&&gp.buttons[i].pressed;
+  const x=gp.axes[0]||0,y=gp.axes[1]||0;
+  let k='S';
+  const fb=[0,1,2,3].find(i=>b(i)&&map['b'+i]);
+  if(fb!==undefined)k='b'+fb;
+  else if(b(12)||y<-.5)k='F';
+  else if(b(13)||y>.5)k='B';
+  else if(b(14)||x<-.5)k='L';
+  else if(b(15)||x>.5)k='R';
+  setKey(k);
+},30);
+</script>
+</body>
+</html>
